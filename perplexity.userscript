@@ -1,0 +1,102 @@
+// ==UserScript==
+// @name         Improve Perplexity (Enhanced)
+// @namespace    https://www.perplexity.ai
+// @version      3.4
+// @description  Replace the searched string on perplexity.ai with a hyperlink to Google and input the value into a textarea, simulating real typing to prevent it from being cleared.
+// @author       leoric
+// @match        https://*.perplexity.ai/*
+// @grant        none
+// @icon         https://www.perplexity.ai/favicon.ico
+// ==/UserScript==
+
+(function () {
+    'use strict';
+    console.log("[Violentmonkey] Script started...");
+
+
+    let stopObserving = false;
+    let searchedTextElement = 'h1';
+
+    function noRegister() {
+    document.querySelectorAll('div.text-align-center.relative.truncate.leading-loose').forEach(button => {
+      if(button.innerHTML == 'Close') {
+        button.click();
+
+      }
+    });
+    }
+
+    // Enable scrolling by ensuring overflow is not disabled
+    function enableScroll() {
+        document.body.style.overflow = 'auto';  // Allow scrolling
+        document.documentElement.style.overflow = 'auto'; // Ensure html element allows scrolling too
+        console.log("[Violentmonkey] Scroll enabled on the page.");
+    }
+
+    // Function to detect div state and check if a link is missing
+    function detectDivState() {
+        let targetDivs = document.querySelectorAll(searchedTextElement);
+        let hasNoLink = Array.from(targetDivs).some(div => !div.querySelector('a'));
+        return { targetDivs, hasNoLink };
+    }
+
+    // Modify the div elements by adding Google search links
+    function modifyDivs(targetDivs) {
+        targetDivs.forEach(div => {
+            if (!div.querySelector('a')) { // extra guard to avoid double-replacing
+                const originalText = div.innerText.trim();
+                const googleLink = `<a href="https://www.google.com/search?q=${encodeURIComponent(originalText)}"
+                                    style="text-decoration: underline;">${originalText}</a>`;
+                div.innerHTML = googleLink;
+                console.log("[Violentmonkey] Modified div with Google link:", originalText);
+            }
+        });
+    }
+
+    // Monitor the page for new divs and modify them with links
+    function waitForDivAndModify() {
+        const divCheckInterval = setInterval(() => {
+            if (stopObserving) {
+                clearInterval(divCheckInterval);
+                return;
+            }
+            const state = detectDivState();
+            if (state.hasNoLink) {
+                modifyDivs(state.targetDivs);
+            } else {
+                clearInterval(divCheckInterval);
+            }
+        }, 500);
+    }
+
+    // Stop all observers
+    function stopAllObservers() {
+        stopObserving = false;
+        console.log("[Violentmonkey] Stopped all observers.");
+    }
+
+    // Observer for initial Google link transformation
+    const divObserver = new MutationObserver((mutations) => {
+        mutations.forEach(mutation => {
+            if (mutation.type === 'childList' || mutation.type === 'characterData') {
+                const state = detectDivState();
+                if (state.hasNoLink) modifyDivs(state.targetDivs);
+            }
+        });
+    });
+
+    divObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true // catch text node changes too
+    });
+
+    // Kick off monitoring after page loads
+    window.addEventListener('load', () => {
+        console.log("[Violentmonkey] Page loaded, starting monitors...");
+        enableScroll(); // Enable scroll once the page has loaded
+        noRegister();
+        setTimeout(waitForDivAndModify, 500);
+    });
+
+})();
