@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Improve Perplexity (Enhanced) - Stable Title Capture
+// @name         Improve Perplexity (Enhanced) - Stable Title + Lexical Debug
 // @namespace    https://www.perplexity.ai
-// @version      3.8
-// @description  Capture a stable <title> once (after site JS finishes), then replace header text with a Google link using that frozen value.
+// @version      3.9
+// @description  Capture stable <title> once, inject into headers, and set the Lexical-powered #ask-input with rich debug logs.
 // @author       leoric
 // @match        https://*.perplexity.ai/*
 // @grant        none
@@ -17,13 +17,12 @@
   // Where to inject the link:
   const targetElementsSelector = 'h1';
 
-  // Titles we want to ignore/reject:
+  // Ignore placeholder / early titles:
   const placeholderText = 'Ask anything…';
-  const rejectRegex = /perplexity/i; // reject any title containing "Perplexity" (early default)
+  const rejectRegex = /perplexity/i;
 
-  // How long the title must remain unchanged to be considered "stable":
   const STABLE_MS = 800;
-  const TIMEOUT_MS = 15000;
+  const TITLE_TIMEOUT_MS = 15000;
 
   function enableScroll() {
     document.body.style.overflow = 'auto';
@@ -41,9 +40,8 @@
 
   function cleanTitle(t) {
     if (!t) return '';
-    // strip placeholder, trim
     t = t.replace(placeholderText, '').trim();
-    // optional: strip site suffixes; uncomment if needed
+    // Optional: strip site suffix
     // t = t.replace(/\s*[-–—]\s*Perplexity(?: AI)?$/i, '').trim();
     return t;
   }
@@ -68,11 +66,10 @@
 
     let changed = 0;
     nodes.forEach(node => {
-      if (node.querySelector('a')) return; // already injected
+      if (node.querySelector('a')) return;
       node.replaceChildren(createGoogleLink(capturedTitle));
       changed++;
     });
-
     if (changed) {
       console.log('[Violentmonkey] Injected links into', changed, 'node(s). Using title =', capturedTitle);
     }
@@ -88,7 +85,7 @@
       const done = injectLinksOnce(capturedTitle);
       if (done || Date.now() - start > 10000) {
         clearInterval(interval);
-        console.log('[Violentmonkey] Injection complete (or timed out).');
+        console.log('[Violentmonkey] Header injection complete (or timed out).');
       }
     }, 250);
   }
@@ -110,15 +107,13 @@
         last = t;
         lastChange = performance.now();
         best = t;
-        // debug
-        // console.log('[Violentmonkey] Title mutation observed:', t);
+        console.log('[Violentmonkey] Title mutation:', JSON.stringify(t));
       }
     };
 
     const mo = new MutationObserver(onMut);
     mo.observe(titleEl, { childList: true, characterData: true, subtree: true });
 
-    // Also poll, because some frameworks set document.title without touching <title> node
     const poll = setInterval(onMut, 100);
 
     const start = performance.now();
@@ -129,23 +124,171 @@
       if (isAcceptableTitle(last) && stableFor >= STABLE_MS) {
         clearInterval(poll);
         mo.disconnect();
-        console.log('[Violentmonkey] Stable title captured:', last, `(stable ${Math.round(stableFor)}ms)`);
+        console.log('[Violentmonkey] Stable title captured:', JSON.stringify(last), `(stable ${Math.round(stableFor)}ms)`);
         return last;
       }
 
-      if (performance.now() - start > TIMEOUT_MS) {
+      if (performance.now() - start > TITLE_TIMEOUT_MS) {
         clearInterval(poll);
         mo.disconnect();
         const fallback = isAcceptableTitle(best) ? best : cleanTitle(document.title.trim());
-        console.warn('[Violentmonkey] Title capture timed out. Using fallback:', fallback);
+        console.warn('[Violentmonkey] Title capture timed out. Using fallback:', JSON.stringify(fallback));
         return fallback || 'Search';
       }
     }
   }
 
+  // --------- Lexical Helpers with DEBUG ---------
+
+  function waitForFollowUp(ms = 10000) {
+    return new Promise(resolve => {
+      const t0 = Date.now();
+      const timer = setInterval(() => {
+        const el = document.querySelector('#ask-input[contenteditable="true"][data-lexical-editor="true"]');
+        if (el) {
+          clearInterval(timer);
+          resolve(el);
+        } else if (Date.now() - t0 > ms) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, 100);
+    });
+  }
+
+  function logLexicalTree(editor, label = 'BEFORE') {
+    try {
+      editor.getEditorState().read(() => {
+        const L = (window.lexical || {});
+        const $getRoot = L.$getRoot;
+        if (!$getRoot) {
+          console.warn('[Violentmonkey] logLexicalTree: window.lexical not exposed; cannot traverse nodes.');
+          return;
+        }
+        const root = $getRoot();
+        const kids = root.getChildren();
+        const summary = kids.map((k, i) => {
+          const type = k.getType ? k.getType() : typeof k;
+          let text = '';
+          try {
+            if (type === 'paragraph') {
+              const spans = k.getChildren();
+              text = spans.map(s => (s.getTextContent ? s.getTextContent() : '')).join('');
+            } else {
+              text = k.getTextContent ? k.getTextContent() : '';
+            }
+          } catch (e) {}
+          return { idx: i, type, text };
+        });
+        console.log(`[Violentmonkey] Lexical tree ${label}:`, { childCount: kids.length, summary });
+      });
+    } catch (e) {
+      console.warn('[Violentmonkey] logLexicalTree error:', e);
+    }
+  }
+
+  async function setFollowUp(value) {
+    const inputDiv = await waitForFollowUp();
+    if (!inputDiv) {
+      console.warn('[Violentmonkey] #ask-input not found within timeout.');
+      return;
+    }
+
+    console.log('[Violentmonkey] #ask-input found. data-lexical-editor =', inputDiv.getAttribute('data-lexical-editor'));
+
+    // Lexical editor instance is usually here:
+    const editor = inputDiv.__lexicalEditor;
+    console.log('[Violentmonkey] __lexicalEditor present:', Boolean(editor));
+
+    const L = (window.lexical || {});
+    const haveLexicalAPI = !!(L.$getRoot && L.$createParagraphNode && L.$createTextNode);
+    console.log('[Violentmonkey] window.lexical available:', Boolean(window.lexical),
+                'have $getRoot/$createParagraphNode/$createTextNode:', haveLexicalAPI);
+
+    if (editor && haveLexicalAPI) {
+      // Proper Lexical path with detailed logs
+      try {
+        logLexicalTree(editor, 'BEFORE');
+
+        editor.update(() => {
+          const root = L.$getRoot();
+          console.log('[Violentmonkey] $getRoot() =>', root ? ('key=' + root.getKey()) : root);
+
+          // Clear content
+          root.clear();
+
+          // Build new paragraph + text
+          const p = L.$createParagraphNode();
+          const t = L.$createTextNode(value);
+          p.append(t);
+          root.append(p);
+
+          // Move selection to end (optional)
+          try {
+            const sel = L.$getSelection ? L.$getSelection() : null;
+            if (sel && sel.setTextNodeRange) {
+              sel.setTextNodeRange(t, value.length, t, value.length);
+            }
+          } catch (e) {
+            // selection is optional; ignore if not available
+          }
+        });
+
+        // Read back and log AFTER state
+        setTimeout(() => logLexicalTree(editor, 'AFTER'), 0);
+
+        console.log('[Violentmonkey] Set #ask-input via Lexical API to:', value);
+        return;
+      } catch (e) {
+        console.warn('[Violentmonkey] Lexical API update failed, will try fallback. Error:', e);
+      }
+    } else {
+      // Extra insight if the editor exists but window.lexical is not exposed
+      if (editor && !haveLexicalAPI) {
+        try {
+          // Try to introspect internal nodeMap root for debugging only
+          const nodeMap = editor._editorState && editor._editorState._nodeMap;
+          const rootNode = nodeMap && nodeMap.get('root');
+          console.log('[Violentmonkey] Internal nodeMap root (debug):', rootNode);
+        } catch (e) {}
+      }
+    }
+
+    // Fallback: simulate user input (works with most Lexical setups)
+    try {
+      inputDiv.focus();
+
+      // Select all existing content
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      const r = document.createRange();
+      r.selectNodeContents(inputDiv);
+      sel.addRange(r);
+
+      // Replace with the target text
+      const ok = document.execCommand('insertText', false, value);
+      console.log('[Violentmonkey] Fallback execCommand insertText success:', ok);
+
+      // Place caret at end just in case
+      sel.removeAllRanges();
+      const r2 = document.createRange();
+      r2.selectNodeContents(inputDiv);
+      r2.collapse(false);
+      sel.addRange(r2);
+
+      console.log('[Violentmonkey] Set #ask-input via fallback to:', value);
+    } catch (e) {
+      console.error('[Violentmonkey] Fallback input failed:', e);
+    }
+  }
+
+  // ----------------- MAIN -----------------
   (async function main() {
     const captured = await waitForStableTitle();
     // Do not read document.title again after this point.
     waitForTargetsAndInject(captured);
+
+    // Now set #ask-input with the captured text, with full debug:
+    await setFollowUp(captured);
   })();
 })();
